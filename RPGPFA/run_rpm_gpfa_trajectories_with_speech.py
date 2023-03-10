@@ -6,16 +6,16 @@ import matplotlib.pyplot as plt
 import torch
 import imageio
 import pickle
-from utils import get_speech_samples
-from unstructured_recognition_gpfa import UnstructuredRecognition, save_gprpm, load_gprpm
+from recognition_parametrised_gpfa import RPGPFA
+from utils import diagonalize
 
 # Reproducibility
-# np.random.seed(1)
-# torch.manual_seed(1)
+np.random.seed(1)
+torch.manual_seed(1)
 
 ergodic = False
 use_sound_speech = False
-num_observation = 3 # 20
+num_observation = 10 #20
 num_inducing = 50
 len_snippet = 100
 dim_latent = 2
@@ -23,10 +23,6 @@ dim_latent = 2
 
 # GPUs ?
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-if torch.cuda.is_available():
-    print('GP-RPM on GPU')
-else:
-    print('GP-RPM on CPU')
 
 # Data type: float64 / float32
 data_type = torch.float32
@@ -109,12 +105,6 @@ if plot_observations:
 
 
 #%%
-
-audio_path = './../timit/train/'
-
-# return of size  x T x 4 x len_snippet
-distance_modulated_audio, time_snippet_sec = get_speech_samples(distance_from_fixed, audio_path,
-                                                                downsample=20, len_snippet=len_snippet, normalize=True)
 #%% Fit
 
 time_locations = torch.arange(0, len_observation, device=device, dtype=data_type).unsqueeze(-1)
@@ -124,39 +114,53 @@ inducing_locations = torch.linspace(0, len_observation,   num_inducing, device=d
 # Build Observed Factors (Transfer to GPU if necessary)
 observations1 = torch.tensor(video_tensor[:num_observation, :, 1:][..., 1:-2], device=device, dtype=data_type)
 observations1 = (1 - observations1 / observations1.max())
+observations2 = torch.tensor(distance_from_fixed[:num_observation], device=device, dtype=data_type)
 
 
-if use_sound_speech:
-    distance_modulated_audio = distance_modulated_audio[:num_observation].reshape(num_observation, len_observation, -1)
-    observations2 = torch.tensor(distance_modulated_audio, device=device, dtype=data_type)
-else:
-    observations2 = torch.tensor(distance_from_fixed[:num_observation], device=device, dtype=data_type)
+#%%
+
+def normalize_observations(obs, num_event_dim=1):
+
+    full_dim = obs.shape
+    batch_dim = torch.tensor(obs.shape[:num_event_dim])
+    event_dim = torch.tensor(obs.shape[num_event_dim:])
+
+    obs = obs.reshape(batch_dim.prod(), event_dim.prod())
+    o_mean, o_std = torch.mean(obs, dim=0, keepdim=True), torch.std(obs, dim=0, keepdim=True)
+    obs = (obs - o_mean) / (o_std + 1e-6)
+    obs = obs.reshape(full_dim)
+
+    return obs
+
+observations1 = normalize_observations(observations1, num_event_dim=2)
+observations2 = normalize_observations(observations2, num_event_dim=2)
+
+
 
 observations = (observations1, observations2)
-observation_locations = time_locations
-inducing_locations = torch.linspace(0, len_observation,   num_inducing, device=device, dtype=data_type)\
-    .unsqueeze(-1)
-
+observation_locations = torch.linspace(0, 1, len_observation, device=device, dtype=data_type).unsqueeze(-1)
+inducing_locations = torch.linspace(0, 1,   num_inducing, device=device, dtype=data_type).unsqueeze(-1)
 
 fit_params = {'dim_latent': 2,
                'inference_mode': 'VariationalBound',
-               'constraint_factors': 'full',
-               'ite_out': 800,
-               'ite_prior': 50,
-               'ite_inducing_points': 50,
-               'ite_factors': 50,
-               'optimizer_prior': {'name': 'Adam', 'param': {'lr': 0.5e-3}},
-               'optimizer_factors': {'name': 'Adam', 'param': {'lr': 1e-3}},
-               'optimizer_inducing_points': {'name': 'Adam', 'param': {'lr': 0.5e-3}},
+               'constraint_factors': 'fixed_diag',
+               'num_epoch': 20000,
+               'optimizer_prior': {'name': 'Adam', 'param': {'lr': 1e-3}},
+               'optimizer_factors': {'name': 'Adam', 'param': {'lr': 1e-4}},
+               'optimizer_inducing_points': {'name': 'Adam', 'param': {'lr': 1e-3}},
                'gp_kernel': 'RBF',
-               'dim_hidden': ([40, 40], [40, 40]), # was all 20
-                'nn_type': ('convolutional', 'feedforward'),
-                'ergodic': ergodic
+               'dim_hidden': ([50, 50], [50, 50]), # was all 20
+               'nn_type': ('convolutional', 'perceptron'),
+               'minibatch_size': len_observation,
+               'ergodic': False
                 }
 
-model = UnstructuredRecognition(observations, observation_locations,
-                                inducing_locations=inducing_locations,
-                                fit_params=fit_params)
+
+model = RPGPFA(observations, observation_locations,
+               inducing_locations=inducing_locations,
+               fit_params=fit_params)
+
+
 
 print('RP-GPFA Video + Sound - Speech=' + str(use_sound_speech))
 print('Fit params')
@@ -168,11 +172,154 @@ print('________________________________________________________')
 model.fit(observations)
 
 
-# Save Model
-model_name = '../results_gp_rpm/gpfa_video_speech_rpm_speech' + str(use_sound_speech) + '_' + datetime.now().strftime("%Y_%M_%d_%Hh%Mm%Ss") + '.pkl'
-print("Saving: ", model_name)
 
-save_gprpm(model, observations, observation_locations, model_name,
-           true_latent=main_trajectory,
-           convert_to_cpu=torch.cuda.is_available())
+
+
+
+model_name = 'tmp'
+latent_true = main_trajectory[:num_observation]
+
+
+
+#%%
+
+from utils_process import plot_summary, plot_factors_prior, plot_loss
+
+
+plot_loss(model)
+plot_factors_prior(model)
+plot_summary(model, latent_true=latent_true, plot_observation=[0], plot_factors_id= 'all', plot_regressed='linear',
+             plot_true=True)
+
+
+
+
+#%%
+
+
+
+from kernels import RBFKernel
+
+
+plot_summary(model, observations, latent_true, plot_factor_id=-1, plot_regressed=False, plot_n=None)
+
+
+
+
+#%%
+
+
+
+
+
+
+
+#%% Plot Loss
+offset = 0
+plt.figure()
+plt.plot(model.loss_tot[offset:])
+plt.xlabel('Iterations')
+plt.ylabel('Free Energy')
+
+
+#%% Plot infered Latent
+
+from torch import matmul
+from utils_process import custom_procurustes, plot_ellipses
+
+# Dimensions
+dim_latent = model.dim_latent
+num_factors = model.num_factors
+num_observation = model.num_observation
+len_observation = model.len_observation
+
+# Latent Mean and variance
+Zt = model.variational_marginals.suff_stat_mean[0].detach().clone()
+St = model.variational_marginals.suff_stat_mean[1].detach().clone().diagonal(dim1=-1, dim2=-2) - Zt**2
+dim_latent = Zt.shape[-1]
+
+# Reshape and reorder fit and target
+latent_true = main_trajectory[:num_observation]
+latent_mean_fit = Zt
+latent_variance_fit = diagonalize(St)
+
+do_procrustres = True
+# Rotate and Rescale
+if do_procrustres:
+
+    shape_cur = (num_observation, len_observation, dim_latent)
+    shape_tmp = (num_observation * len_observation, dim_latent)
+
+    # Reshape And Diagonalize
+    latent_true = main_trajectory[:num_observation].reshape(shape_tmp)
+    latent_mean_fit = latent_mean_fit.reshape(shape_tmp)
+    latent_variance_fit = latent_variance_fit.reshape((*shape_tmp, dim_latent))
+
+    # Procrustes Transformation
+    latent_true, latent_mean_fit, _, _, R2tot = custom_procurustes(latent_true, latent_mean_fit.numpy())
+    R2Ttot = torch.tensor(R2tot.T, dtype=model.dtype).unsqueeze(0)
+    R2tot = torch.tensor(R2tot, dtype=model.dtype).unsqueeze(0)
+
+    # Back to torch
+    latent_true = torch.tensor(latent_true, dtype=model.dtype)
+    latent_mean_fit = torch.tensor(latent_mean_fit, dtype=model.dtype)
+    latent_variance_fit = matmul(R2Ttot, matmul(latent_variance_fit, R2tot))
+
+    # Reshape
+    latent_true = latent_true.reshape(shape_cur)
+    latent_mean_fit = latent_mean_fit.reshape(shape_cur)
+    latent_variance_fit = latent_variance_fit.reshape((*shape_cur, dim_latent))
+
+
+# Color with time
+color_temporal_position = torch.cat((
+    torch.linspace(0, 1, model.len_observation).unsqueeze(1),
+    torch.linspace(0, 0, model.len_observation).unsqueeze(1),
+    torch.linspace(1, 0, model.len_observation).unsqueeze(1)),
+    dim=1)
+
+# Plot indices
+plot_num = 10
+plot_offset = 0
+plot_index = np.arange(plot_num) + plot_offset
+
+plt.figure(figsize=(3 * len(plot_index), 2 * 3))
+for nn_id in range(len(plot_index)):
+
+    # Current observation
+    nn = plot_index[nn_id]
+
+    # Plot true trajectory
+    ax0 = plt.subplot(2, len(plot_index), 1 + nn_id + 0 * len(plot_index))
+    plt.scatter(latent_true[nn, :, 0], latent_true[nn, :, 1], c=color_temporal_position, s=50, label='t=0')
+    plt.title('Example ' + str(1 + nn) + '/' + str(model.num_observation))
+    plt.grid()
+
+    if nn_id == 0:
+        plt.ylabel('True Trajectory \nz2[t]', multialignment='center')
+    elif nn == len(plot_index)-1:
+        plt.legend()
+
+    # PLot fitted latents
+    ax1 = plt.subplot(2, len(plot_index), 1 + nn_id + 1 * len(plot_index))
+    latent_mean = latent_mean_fit[nn]
+    latent_variance = latent_variance_fit[nn]
+    plot_ellipses(latent_mean, latent_variance, ax1)
+    plt.autoscale(enable=True, axis='xy', tight=True)
+    plt.scatter(latent_mean[:, 0], latent_mean[:, 1], c=color_temporal_position, s=50)
+    plt.xlabel('z1[t]')
+    if nn_id == 0:
+        plt.ylabel('Recognized Latent \nz2[t]', multialignment='center')
+    plt.grid()
+
+
+
+
+
+
+#%%
+
+
+
+
 

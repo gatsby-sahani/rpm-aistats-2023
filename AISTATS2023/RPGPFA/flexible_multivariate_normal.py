@@ -12,34 +12,30 @@ from torch.distributions.multivariate_normal import _batch_mv as mv
 
 class FlexibleMultivariateNormal:
     """
-        Batch multivariate normal distributions parametrised with natural or mean parameters
-            Variant of torch.distributions.multivariate_normal.MultivariateNormal designed for RP-GPFA
+        Batch multivariate normal distributions parametrised with natural parameters
+            FlexibleMultivariateNormal is a variant torch.distributions.multivariate_normal.MultivariateNormal designed
+            for Recognition Parametrised Gaussian Process Factor Analysis (RP-GPFA)
 
-        The FlexibleMultivariateNormal distributions can be parameterized with:
-            - mean vector and (Cholesky) covariance matrix (init_natural=False)
-            - 1st and (Cholesky) 2nd natural parameter     (init_natural=True)
-
+        The multivariate normal distributions can be parameterized either with:
+            - mean vector (and Cholesky decomposition of) covariance matrix (init_natural=False)
+            - 1st natural parameter (and Cholesky decomposition of) the 2nd natural parameter (init_natural=True)
+        
         Args:
             param_vector (Tensor): mean or 1st natural parameter
-            param_matrix (Tensor): (Cholesky) covariance or 2nd natural parameter
+            param_matrix (Tensor): (lower Cholesky decomposition of) Covariance matrix or 2nd natural parameter
 
-            init_natural (Bool) : Define the parametrization
-            init_cholesky (Bool): Full matrix or lower Cholesky
+            init_natural (Bool): Define the parametrization
+            init_chol (Bool): Use a lower Cholesky decomposition to parametrize param_matrix
 
-            store_param_chol (Bool): if samples needed, we store scale matrix
-            store_suff_stat_mean (Bool): if sufficient statistic mean needed (eg KL(p||.))
-            store_suff_stat_variance (Bool): if sufficient statistic variance needed
+            use_sample (Bool): if rsample needed, we store the lower Cholesky decomposition of covariance matrix
+            use_suff_stat_mean (Bool): if sufficient statistic mean needed (eg KL(p||.))
+            use_suff_stat_variance (Bool): if sufficient statistic variance needed (eg 2nd order approx)
 
-        Ref:
-            https://en.wikipedia.org/wiki/Exponential_family#Table_of_distributions
+        Ref: https://en.wikipedia.org/wiki/Exponential_family#Table_of_distributions
         """
 
-    def __init__(self, param_vector, param_matrix,
-                 init_natural=True, init_cholesky=True,
-                 store_param_chol=False,
-                 store_natural_chol=False,
-                 store_suff_stat_mean=False,
-                 store_suff_stat_variance=False, jitter=1e-6):
+    def __init__(self, param_vector, param_matrix, init_natural=True, init_chol=True,
+                 use_sample=False, use_suff_stat_mean=False, use_suff_stat_variance=False):
 
         # Device and Data Type
         self.dtype = param_vector.dtype
@@ -57,122 +53,104 @@ class FlexibleMultivariateNormal:
         if not (event_shape_mat[0] == event_shape_vec) or not (event_shape_mat[1] == event_shape_vec):
             raise ValueError("Incompatible Event Dimensions")
 
-        # Store Valid shapes
         self.batch_shape = batch_shape_vec
         self.event_shape = event_shape_vec
 
         # Check Param Matrix
-        if init_cholesky and not (param_matrix.equal(param_matrix.tril())):
-            raise ValueError("Cholesky Matrices must be lower triangular")
+        if not (param_matrix.equal(param_matrix.tril())) and init_chol:
+            raise ValueError("Matrix Parameter must be lower triangular")
 
-        # Jitter Identity Matrix
-        Id = self.get_batch_identity(eps=jitter)
+        if init_chol:
+            if param_matrix.diagonal(dim1=-2, dim2=-1).min() < 0:
+                raise ValueError("Cholesky Convention: positive diagonal")
 
+        # Batch Identity Matrix
+        Id = self.get_batch_identity()
+
+        # Init Distributions
         if init_natural:
-            # 1st natural parameter
+            # With natural Parameters
             natural1 = param_vector
 
-            # 2nd natural parameter and its Cholesky Decomposition
-            if init_cholesky:
+            if init_chol:
+                # Cholesky Initialization
                 natural2 = - matmul(param_matrix, param_matrix.transpose(-2, -1))
             else:
+                # Reparametrize param_matrix with its Cholesky decomposition
                 natural2 = param_matrix
-                param_matrix = cholesky(-param_matrix + Id)
+                param_matrix = cholesky(-param_matrix)
 
-            # Mean and Covariance Parameters
-            covariance = 0.5 * cholesky_inverse(param_matrix)
+            covariance = 0.5 * cholesky_inverse(param_matrix + torch.tensor([1e-20], device=self.device) * Id)
             mean = matmul(covariance, natural1.unsqueeze(-1)).squeeze(-1)
 
-            # 0.5 * log |covariance|
-            t2 = torch.tensor([2], dtype=self.dtype, device=self.device)
-            half_log_det_covariance = - torch.log(param_matrix.diagonal(dim1=-2, dim2=-1)).sum(-1) \
-                                      - 0.5 * self.event_shape * torch.log(t2)
-
-            if store_param_chol:
-                scale = cholesky(covariance)
-
-            if store_natural_chol:
-                natural2_chol = param_matrix
+            half_log_det_covariance = - (param_matrix.diagonal(dim1=-2, dim2=-1)).log().sum(-1) \
+                                      - 0.5 * self.event_shape * torch.log(torch.tensor([2], dtype=self.dtype, device=self.device))
+            if use_sample:
+                scale_tril = cholesky(covariance)
 
         else:
-            # With Mean and Covariance parameters
+            # With parameters
             mean = param_vector
 
-            # Covariance and its Cholesky Decomposition
-            if init_cholesky:
+            if init_chol:
+                # Cholesky Initialization
                 covariance = matmul(param_matrix, param_matrix.transpose(-2, -1))
             else:
+                # Reparametrize param_matrix with its Cholesky decomposition
                 covariance = param_matrix
-                param_matrix = cholesky(param_matrix + Id)
+                Id = self.get_batch_identity()
+                param_matrix = cholesky(param_matrix + 1e-12 * Id)
 
-            natural2 = - 0.5 * cholesky_inverse(param_matrix)
-            natural1 = - 2 * matmul(natural2, mean.unsqueeze(-1)).squeeze(-1)
+            natural2 = - 0.5 * cholesky_inverse(param_matrix + torch.tensor([1e-20], device=self.device) * Id)
+            natural1 = -2 * matmul(natural2, mean.unsqueeze(-1)).squeeze(-1)
 
-            # 0.5 * log |covariance|
-            half_log_det_covariance = torch.log(param_matrix.diagonal(dim1=-2, dim2=-1)).sum(-1)
+            half_log_det_covariance = param_matrix.diagonal(dim1=-2, dim2=-1).log().sum(-1)
 
-            if store_param_chol:
-                scale = param_matrix
+            if use_sample:
+                scale_tril = param_matrix
 
-        # Get and Store Log Normaliser
-        log_normaliser = half_log_det_covariance \
-                         + 0.5 * matmul(natural1.unsqueeze(-2), mean.unsqueeze(-1)).squeeze(-1).squeeze(-1) \
-                         + 0.5 * self.event_shape * log(2 * torch.tensor([np.pi], dtype=self.dtype, device=self.device))
-        self.log_normalizer = log_normaliser
-
-        # Get and Store Entropy
-        entropy = 0.5 * self.event_shape * (1.0 + log(
-            2 * torch.tensor([np.pi], dtype=self.dtype, device=self.device))) + half_log_det_covariance
-        self.entropy = entropy
-
-        # Store Natural Parametrization
+        # Favored Parametrization with naturals
         self.natural1 = natural1
         self.natural2 = natural2
 
-        if store_param_chol:
-            self.scale_tril = scale
+        # Store Normaliser
+        log_normaliser = half_log_det_covariance \
+                         + 0.5 * matmul(natural1.unsqueeze(-2), mean.unsqueeze(-1)).squeeze(-1).squeeze(-1)  \
+                         + 0.5 * self.event_shape * log(2 * torch.tensor([np.pi], dtype=self.dtype, device=self.device))
+        self.log_normalizer = log_normaliser
+
+        # Store Entropy
+        entropy = 0.5 * self.event_shape * (1.0 + log(2 * torch.tensor([np.pi], dtype=self.dtype, device=self.device))) + half_log_det_covariance
+        self.entropy = entropy
+
+        # Store sufficient Statistics 1st Moment
+        if use_suff_stat_mean:
+            meanmeanT = matmul(mean.unsqueeze(-1), mean.unsqueeze(-2))
+            suff_stat_mean = (mean, covariance + meanmeanT)
+            self.suff_stat_mean = suff_stat_mean
+        else:
+            self.suff_stat_mean = None
+
+        # Store sufficient Statistics 2nd Moment
+        if use_suff_stat_variance:
+            cocovariance = fourth_moment(covariance)
+            suff_stat_variance = (covariance, cocovariance)
+            self.suff_stat_variance = suff_stat_variance
+        else:
+            self.suff_stat_variance = None
+
+        if use_sample:
+            self.scale_tril = scale_tril
             self.loc = mean
         else:
             self.scale_tril = None
             self.loc = None
 
-        if store_natural_chol:
-            self.natural2_chol = natural2_chol
-        else:
-            self.natural2_chol = None
-
-        # Store sufficient Statistics 1st Moment
-        if store_suff_stat_mean:
-            meanmeanT = matmul(mean.unsqueeze(-1), mean.unsqueeze(-2))
-            self.suff_stat_mean = (mean, covariance + meanmeanT)
-        else:
-            self.suff_stat_mean = None
-
-        # Store sufficient Statistics 2nd Moment
-        if store_suff_stat_variance:
-            self.suff_stat_variance = get_suff_stat_variance(mean, covariance)
-        else:
-            self.suff_stat_variance = None
-
-    def mean_covariance(self):
-        if self.suff_stat_mean is None:
-            raise ValueError("Mean of the sufficient statistic not stored")
-        else:
-            T1, T2 = self.suff_stat_mean
-            mean = T1
-            covariance = T2 - matmul(T1.unsqueeze(-1), T1.unsqueeze(-2))
-        return mean, covariance
-
-    def suff_stat_vector(self):
-        if self.suff_stat_mean is None:
-            raise ValueError("Mean of the sufficient statistic not stored")
-        else:
-            T1, T2 = self.suff_stat_mean
-
-        event_shape = self.event_shape
-        batch_shape = self.batch_shape
-
-        return torch.cat((T1, T2.reshape(*batch_shape, event_shape * event_shape)), dim=-1)
+    def get_batch_identity(self):
+        Id = torch.zeros(self.batch_shape + torch.Size([self.event_shape, self.event_shape]),
+                         dtype=self.dtype, device=self.device)
+        Id[..., :, :] = torch.eye(self.event_shape, dtype=self.dtype, device=self.device)
+        return Id
 
     def log_prob(self, value):
 
@@ -189,25 +167,6 @@ class FlexibleMultivariateNormal:
         shape = sample_shape + self.batch_shape + torch.Size([self.event_shape])
         eps = _standard_normal(shape, dtype=self.dtype, device=self.device)
         return self.loc + mv(self.scale_tril, eps)
-
-    def get_batch_identity(self, eps=1e-6):
-        Id = torch.zeros(self.batch_shape + torch.Size([self.event_shape, self.event_shape]),
-                         dtype=self.dtype, device=self.device)
-        Id[..., :, :] = torch.eye(self.event_shape, dtype=self.dtype, device=self.device)
-
-        eps = torch.tensor(eps, device=self.device, dtype=self.dtype, requires_grad=False)
-        # Batch Identity Matrix or 0 tensor
-        if eps > 0:
-            return eps * Id
-        else:
-            return eps
-
-
-class NNFlexibleMultivariateNormal:
-    """Build Non-Normalized Flexible Multivariate distributions (Consistent with FlexibleMultivariateNormal)"""
-    def __init__(self, natural1, natural2):
-        self.natural1 = natural1
-        self.natural2 = natural2
 
 
 def flexible_kl(p: FlexibleMultivariateNormal, q: FlexibleMultivariateNormal,
@@ -228,23 +187,23 @@ def flexible_kl(p: FlexibleMultivariateNormal, q: FlexibleMultivariateNormal,
     event_shape_p = p.event_shape
     event_shape_q = q.event_shape
 
-    if not (event_shape_p == event_shape_q):
+    if not(event_shape_p == event_shape_q):
         raise ValueError("Distribution do not have the same dimensions")
 
     batch_shape_p = p.batch_shape
     batch_shape_q = q.batch_shape
 
-    if not (batch_shape_p == batch_shape_q):
+    if not(batch_shape_p == batch_shape_q):
         # If p and q do not share the same shape: broadcast according to repeat1 and repeat2
 
         if (repeat1 is None) or (repeat2 is None):
             raise ValueError('Distribution have different batch shape. Must provide helper to combine them')
         else:
-            if not (len(batch_shape_p) == len(repeat1)) or not (len(batch_shape_q) == len(repeat2)):
+            if not(len(batch_shape_p) == len(repeat1)) or not(len(batch_shape_q) == len(repeat2)):
                 raise ValueError('Incorrect repeat vector to combine batch shapes.')
 
             # New Batch Dim
-            batch_len = 1 + max([max(repeat1), max(repeat2)])
+            batch_len = 1+max([max(repeat1), max(repeat2)])
 
             # Check that shared dimensions have the same size
             batch_shape1 = torch.zeros(batch_len, dtype=torch.int64, device=p.device)
@@ -253,7 +212,7 @@ def flexible_kl(p: FlexibleMultivariateNormal, q: FlexibleMultivariateNormal,
             batch_shape2 = torch.zeros(batch_len, dtype=torch.int64, device=p.device)
             batch_shape2[repeat2] = torch.tensor(batch_shape_q, dtype=torch.int64, device=p.device)
 
-            if not (((batch_shape1 - batch_shape2) * batch_shape1 * batch_shape2).count_nonzero() == 0):
+            if not(((batch_shape1 - batch_shape2) * batch_shape1 * batch_shape2).count_nonzero() == 0):
                 raise ValueError('Incompatible Repeat vectors to combine batch shapes')
             else:
 
@@ -325,9 +284,25 @@ def kl(natural_p, natural_q, log_normalizer_p, log_normalizer_q, suff_stat_mean_
     return delta_log_normalizer + term1 + term2
 
 
+def fourth_moment(batch_covariances):
+    """
+    Estimate the fourth centered moment of Multivariate Normal with covariance_matrix
+    """
+
+    covariance_vector = vectorize(batch_covariances)
+
+    batch_size = batch_covariances.shape[:-2]
+    IN1 = torch.ones(batch_size + torch.Size([batch_covariances.shape[-1], 1]),
+                     dtype=batch_covariances.dtype, device=batch_covariances.device)
+    I1N = IN1.transpose(-2, -1)
+    ISI = kronecker(kronecker(IN1, batch_covariances), I1N)
+
+    return xxT(covariance_vector) + kronecker(batch_covariances, batch_covariances) + ISI * ISI.transpose(-1, -2)
+
+
 def vectorize(batch_matrix):
     old_shape = batch_matrix.shape
-    new_shape = (*old_shape[:-2], old_shape[-1] * old_shape[-2])
+    new_shape = (*old_shape[:-2], old_shape[-1]*old_shape[-2])
     return batch_matrix.reshape(new_shape)
 
 
@@ -348,78 +323,54 @@ def kronecker(batch_matrix_a, batch_matrix_b):
     return res.reshape(siz0 + siz1)
 
 
-def tril_to_vector(batch_matrix):
-    """
-    Returns N*N Lower Triangular Matrices from an N(N+1) Vector
-    """
-    n = batch_matrix.shape[-1]
-    return batch_matrix[..., np.tril_indices(n)[0], np.tril_indices(n)[1]]
+def xxT(batch_vector):
+    return matmul(batch_vector.unsqueeze(-1), batch_vector.unsqueeze(-2))
 
 
-def vector_to_tril(batch_vector):
+def trace_XXT(batch_matrix):
+    n = batch_matrix.size(-1)
+    m = batch_matrix.size(-2)
+    flat_trace = batch_matrix.reshape(-1, m * n).pow(2).sum(-1)
+    return flat_trace.reshape(batch_matrix.shape[:-2])
+
+
+def vector_to_triul(batch_vector):
     """
-    Returns N(N+1) Vectors from N*N Lower Triangular Matrices
+    Returns N*N Lower Triangular Matrices from an N(N+1) Vectors
     """
+
     # Vector size n(n+1)/2
     n = int(np.floor(-1 / 2 + np.sqrt(1 / 4 + 2 * batch_vector.shape[-1])))
 
-    # Indices
-    tri_low_indices = torch.tril_indices(n, n)
+    # Get Lower triangular indices of n x n matrix
+    tri_low_indices = np.tril_indices(n)
 
-    # Init
-    batch_matrix = torch.zeros((*batch_vector.shape[:-1], n, n), dtype=batch_vector.dtype, device=batch_vector.device)
+    # tri_low_indices = np.triu_indices(n)
+    # L0 = torch.zeros([*batch_vector.shape[:-1], n, n], dtype=batch_vector.dtype, device=batch_vector.device)
+    # L0[..., tri_low_indices[0], tri_low_indices[1]] = batch_vector
 
-    # Set
-    batch_matrix[..., tri_low_indices[0], tri_low_indices[1]] = batch_vector
+    # Diagonal Matrix Indices
+    diag_indices = (np.arange(n), np.arange(n))
 
-    return batch_matrix
+    # Strictly Lower triangular Matrix indices
+    tri_low_strict_indices = np.tril_indices(n, k=-1)
 
+    # Indices for on the Cholesky vector (order = F convention !)
+    idx_tmp = np.arange(n)
+    diag_on_chol = (n * idx_tmp - idx_tmp * (idx_tmp - 1) / 2).astype(int)
+    tril_on_chol = np.setxor1d(diag_on_chol, np.arange(batch_vector.shape[-1]))
 
-def Aik_Bjl(A, B):
-    return kronecker(A, B)
+    # Build lower triangular matrices from data in vectors
+    L = torch.zeros([*batch_vector.shape[:-1], n, n], dtype=batch_vector.dtype, device=batch_vector.device)
 
+    # Off diagonal terms
+    L[..., tri_low_strict_indices[0], tri_low_strict_indices[1]] = batch_vector[..., tril_on_chol]
 
-def AilBjk(A, B):
-    N = A.shape[-1]
-    Gamma = torch.ones(N, 1)
-    Atmp = kronecker(Gamma, kronecker(A, Gamma.transpose(-1, -2)))
-    Btmp = kronecker(Gamma.transpose(-1, -2), kronecker(B, Gamma))
-    return Atmp * Btmp
+    # Diagonal terms constraint to be positive
+    L[..., diag_indices[0], diag_indices[1]] = batch_vector[..., diag_on_chol]
 
-
-def Eijkl_EijEkl(sigma, mu):
-    mumut = matmul(mu, mu.transpose(-1, -2))
-    term1 = Aik_Bjl(sigma, sigma) + AilBjk(sigma, sigma)
-    term2 = Aik_Bjl(sigma, mumut) + AilBjk(sigma, mumut)
-    term3 = Aik_Bjl(mumut, sigma) + AilBjk(mumut, sigma)
-    return term1 + term2 + term3
+    return L
 
 
-def Eij_Ek(sigma, mu):
-    return kronecker(mu, sigma) + kronecker(sigma, mu)
 
-
-def get_suff_stat_variance(mu, sigma):
-
-    event_shape = sigma.shape[-1]
-    batch_shape = sigma.shape[:-2]
-    suff_stat_shape = event_shape * (event_shape + 1)
-
-    C11 = sigma
-    C21 = Eij_Ek(sigma, mu.unsqueeze(-1))
-    C12 = C21.transpose(-1, -2)
-    C22 = Eijkl_EijEkl(sigma, mu.unsqueeze(-1))
-
-    cocovariance = torch.zeros(*batch_shape, suff_stat_shape, suff_stat_shape, dtype=sigma.dtype, device=sigma.device)
-    cocovariance[..., :event_shape, :event_shape] = C11
-    cocovariance[..., :event_shape, event_shape:] = C12
-    cocovariance[..., event_shape:, :event_shape] = C21
-    cocovariance[..., event_shape:, event_shape:] = C22
-
-    return cocovariance
-
-
-def vector_to_tril_diag_idx(n):
-    """Returns diagonal indices from the tril vector"""
-    return np.cumsum(np.array([0, *np.arange(2, n + 1)]))
 
