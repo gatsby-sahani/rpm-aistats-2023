@@ -1,7 +1,9 @@
-
 # RP - GPFA
 
-This repository contains the compagnon code for the Recognition-Parametrised Gaussian Process Factor Analysis (RP-GPFA) experiments.
+Up-to-date implementation of Recognition-Parametrised Gaussian Process Factor Analysis (RP-GPFA).
+The model is summarized below, see
+[Walker\*, Soulat\*, Yu, Sahani\* (2023)](https://arxiv.org/abs/2209.05661) for details.
+
 
 ## Model
 
@@ -15,31 +17,37 @@ $$\mathcal{Z}=\{\mathsf{z}_t:t=1 \dots T\}$$
 
 such that the observations are  conditionally independent across series and across time. The full joint writes:
 
-$$ P_{\theta, \mathbb{X}^N}(\mathcal{X}, \mathcal{Z}) = \prod_{j=1}^J \prod_{t=1}^T \left( p_{0,jt}(\mathsf{x}_{jt}) \frac{f_{\theta j}(\mathsf{z}_{t} | \mathsf{x}_{jt})}{f_{\theta j}(\mathsf{z}_{t})} \right) p_{\theta z}(\mathcal{Z})$$
+$$ P_{\theta, \mathbb{X}^N}(\mathcal{X}, \mathcal{Z}) = \prod_{j=1}^J \prod_{t=1}^T \left( p_{0,jt}(\mathsf{x}_{jt}) \frac{f_{\theta j}(\mathsf{z}_{t} | \mathsf{x}_{jt})}{F_{\theta j}(\mathsf{z}_{t})} \right) p_{\theta z}(\mathcal{Z})$$
 
 
 Each recognition factor is parametrised by a neural network $\theta_j$ that outputs the natural parameters of a multivariate normal distribution given input $\mathsf{x}_{jt}^{(n)}$ and we recall that
 
-$$f_{\theta j}(\mathsf{z}_{t}) = \frac1N \sum_{n=1}^N f_{\theta j}(\mathsf{z}_{t} | \mathsf{x}_{jt}^{(n)})$$
+$$F_{\theta j}(\mathsf{z}_{t}) = \frac1N \sum_{n=1}^N f_{\theta j}(\mathsf{z}_{t} | \mathsf{x}_{jt}^{(n)})$$
 
 Finally, the prior $p_{\theta z}(\mathcal{Z})$ comprises independent Gaussian Process priors over each latent dimension.
 
+Optimization uses a variational interior bound with additional constraint on the auxiliary factors.
 
 ## Repository
 
-We provide the code used in our paper as well as a jupyter notebook to test:
+`recognition_parametrised_gpfa.py` instantiates and fits RP-GPFA.
 
-1) the RP-GPFA on structured bouncing ball experiment. Inference uses the Interior Varional Bound method. 
-   `./demo_rp_gpfa_textured_ball.ipynb`
-   
-2) the RP-GPFA on a bouncing ball experiment with Poisson Emission noise. Inference uses the 2nd Order Approximation method.
-    `./demo_rp_gpfa_poisson_ball.ipynb`
-   
+`flexible_multivariate_normal.py` defines and handles Multivariate Normal Distributions using natural parameters.
+
+We provide 3 Jupyter notebooks to illustrate RP-GPFA:
+
+1) The structured bouncing ball experiment demonstrates the advantages of bypassing the specification a generative when
+emphasis is put on latent identification. See:
+
+    `./demo_textured_bouncing_ball.ipynb`
+
+2) Lorenz attractor dynamics modulates high dimensional observation through on linearity and Poisson noise.
+
+    `./demo_lorenz_attractor.ipynb`
+
+3) 3D moving ellipsoid. RP-GPFA combines video and range sensor signal to infer the 2D position of an "agent" of interest.
+
+    `./demo_textured_bouncing_ball.ipynb`
+
+
 Dependencies are listed in `./rpgpfa.yml`
-
-
-`UnstructuredRecognition` instantiates and fits RP-GPFA.
-
-`FlexibleMultivariate` defines and handles Multivariate Normal Distributions using natural parameters.
-
-
