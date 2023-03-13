@@ -1,3 +1,4 @@
+
 # RP - GPFA
 
 Up-to-date implementation of Recognition-Parametrised Gaussian Process Factor Analysis (RP-GPFA).
@@ -51,3 +52,4 @@ emphasis is put on latent identification. See:
 
 
 Dependencies are listed in `./rpgpfa.yml`
+
