@@ -53,5 +53,5 @@ emphasis is put on latent identification. See:
 
 Dependencies are listed in `./rpgpfa.yml`
 
-(The moving Ellipsoid dataset and stored demo results can be download [here](https://www.dropbox.com/sh/70yc801n3p64ke1/AAC3irVxD9p119N22J1qvqYYa?dl=0) ). 
+(The moving Ellipsoid dataset and stored demo results can be downloaded [here](https://www.dropbox.com/sh/70yc801n3p64ke1/AAC3irVxD9p119N22J1qvqYYa?dl=0) ). 
 
