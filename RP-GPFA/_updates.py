@@ -82,7 +82,7 @@ class Mixin:
         # Variational Marginals Covariance Reshaped and Permuted to ~ N x T x K (note that dimensions are independent)
         marginal_covariance_diag = (K_t_t.unsqueeze(0) + matmul(matmul(K_t_tau_K_tau_tau_inv, delta_K),
                                                                 K_t_tau_K_tau_tau_inv.transpose(-1, -2)
-                                                                ).squeeze(-1).squeeze(-1)).permute(0, 2, 1)
+                                                                ).squeeze(-1).squeeze(-1)).permute(0, 2, 1) # TODO Make this faster ?
 
         # Square Root and Diagonalize the marginal Covariance ~ N x T x K x K (Alternatively, use 1D MVN)
         marginal_covariance_chol = diagonalize(torch.sqrt(marginal_covariance_diag))

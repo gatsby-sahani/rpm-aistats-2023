@@ -22,7 +22,7 @@ def plot_loss(model, offset=0, **kwargs):
     plt.tight_layout()
 
 
-def plot_summary(model, plot_observation='all', plot_factors_id ='all',
+def plot_summary(model, plot_observation='all', plot_factors_id ='all', regress_param = None,
                  latent_true=None, plot_regressed=False, plot_true=False, plot_variance=True, color_rgb=None):
     """
         Plot a summary of the latents discovered using RPGPFA
@@ -78,9 +78,10 @@ def plot_summary(model, plot_observation='all', plot_factors_id ='all',
     latent_var_all = []
     for factors_id in plot_factors_id:
         if plot_regressed:
-            latent_cur, _,  latent_true_plot, _ = regress_latent(model, factors_id, latent_true, regression=plot_regressed)
+            latent_cur, _,  latent_true_plot, _ = regress_latent(model, factors_id, latent_true,
+                                                                 regression=plot_regressed, regress_param=regress_param)
         else:
-            latent_cur, latent_var_cur, _, _  = regress_latent(model, factors_id)
+            latent_cur, latent_var_cur, _, _  = regress_latent(model, factors_id, regress_param=regress_param)
             latent_var_cur = latent_var_cur.diagonal(dim1=-1, dim2=-2)
 
         # Reshape Latents if necessary
@@ -130,17 +131,17 @@ def plot_summary(model, plot_observation='all', plot_factors_id ='all',
 
                 if plot_regressed:
                     latent_true_cur = latent_true_plot[plot_obs_cur, :, dim_cur]
-                    plt.plot(latent_true_cur, c='k', label = 'true', linestyle='-.')
+                    plt.plot(latent_true_cur.cpu(), c='k', label = 'true', linestyle='-.')
                 elif plot_variance:
                     latent_var_plot = latent_var_all[factors_id][plot_obs_cur, :, dim_cur]
                     latent_std_plot = torch.sqrt(latent_var_plot)
                     xx = range(len(latent_var_plot))
                     up = latent_plot + 2 * latent_std_plot
                     lo = latent_plot - 2 * latent_std_plot
-                    plt.fill_between(xx, lo, up, color='k', alpha=.25)
+                    plt.fill_between(xx, lo.cpu(), up.cpu(), color='k', alpha=.25)
 
-                plt.plot(latent_plot, c='k', label='fit')
-                plt.scatter(range(len(latent_plot)), latent_plot, c=color_plot)
+                plt.plot(latent_plot.cpu(), c='k', label='fit')
+                plt.scatter(range(len(latent_plot)), latent_plot.cpu(), c=color_plot)
 
 
                 if dim_cur == 0:
@@ -160,7 +161,7 @@ def plot_summary(model, plot_observation='all', plot_factors_id ='all',
             for dim_cur in range(width):
 
                 plt.subplot(1, width, 1 + dim_cur)
-                latent_true_cur = latent_true_plot[plot_obs_cur, :, dim_cur]
+                latent_true_cur = latent_true_plot[plot_obs_cur, :, dim_cur].cpu()
                 plt.plot(latent_true_cur, c='k', label = 'true')
                 plt.scatter(range(len(latent_true_cur)), latent_true_cur, c=color_plot)
 
@@ -179,13 +180,13 @@ def plot_summary(model, plot_observation='all', plot_factors_id ='all',
 
                 if dim_latent_fit == 3:
                     ax = plt.subplot(1, heigh, 1 + factors_id, projection='3d')
-                    latent_plot = latent_fit_all[factors_id][plot_obs_cur]
+                    latent_plot = latent_fit_all[factors_id][plot_obs_cur].cpu()
                     ax.scatter(latent_plot[:, 0], latent_plot[:, 1], latent_plot[:, 2], c=color_tot[plot_obs_cur], s=10)
                     plt.title(name_factors[factors_id])
 
                 elif dim_latent_fit == 2:
                     plt.subplot(1, heigh, 1 + factors_id)
-                    latent_plot = latent_fit_all[factors_id][plot_obs_cur]
+                    latent_plot = latent_fit_all[factors_id][plot_obs_cur].cpu()
                     plt.scatter(latent_plot[:, 0], latent_plot[:, 1], c=color_tot[plot_obs_cur], s=10)
                     plt.title(name_factors[factors_id])
 
@@ -197,17 +198,17 @@ def plot_summary(model, plot_observation='all', plot_factors_id ='all',
             if dim_latent_true == 3:
                 ax = plt.subplot(1, 1, 1 , projection='3d')
 
-                latent_true_cur = latent_true_plot[plot_obs_cur]
+                latent_true_cur = latent_true_plot[plot_obs_cur].cpu()
                 ax.scatter(latent_true_cur[:, 0], latent_true_cur[:, 1], latent_true_cur[:, 2], c=color_tot[plot_obs_cur], s=10)
                 plt.title('True')
 
             elif dim_latent_true == 2:
-                latent_true_cur = latent_true_plot[plot_obs_cur]
+                latent_true_cur = latent_true_plot[plot_obs_cur].cpu()
                 plt.scatter(latent_true_cur[:, 0], latent_true_cur[:, 1], c=color_tot[plot_obs_cur], s=10)
                 plt.title('True')
 
 
-def regress_latent(model, plot_factor_id=-1, latent_true=None, regression='krr'):
+def regress_latent(model, plot_factor_id=-1, latent_true=None, regression='krr', regress_param=None):
 
     # Grasp Variational or Factors Latent mean and variance
     if plot_factor_id < 0:
@@ -237,9 +238,9 @@ def regress_latent(model, plot_factor_id=-1, latent_true=None, regression='krr')
 
         # Regress Latent - True Latent
         if regression == 'linear':
-            latent_fit, regressor = regress_linear(latent_fit, latent_true)
+            latent_fit, regressor = regress_linear(latent_fit, latent_true, regress_param=regress_param)
         elif regression == 'krr':
-            latent_fit, regressor = regress_krr(latent_fit, latent_true)
+            latent_fit, regressor = regress_krr(latent_fit, latent_true, regress_param=regress_param)
         else:
             raise NotImplementedError
 
@@ -283,10 +284,18 @@ def sample_XYtrain(X, Y, train_pct):
 
     return Xtrain, Ytrain
 
-def regress_linear(X, Y, train_pct=0.5):
+def regress_linear(X, Y, regress_param=None):
+
+    if regress_param is None:
+        regress_param = {}
+        
+    if not ('train_pct' in regress_param.keys()):
+        train_pct = 0.8
+    else:
+        train_pct = regress_param['train_pct']
 
     Xtrain, Ytrain = sample_XYtrain(X, Y, train_pct)
-    XXinv = torch.linalg.inv(1e-6 * torch.eye(Xtrain.shape[-1]) + torch.matmul(Xtrain.transpose(-1, -2), Xtrain))
+    XXinv = torch.linalg.inv(1e-6 * torch.eye(Xtrain.shape[-1], device=Xtrain.device, dtype=Xtrain.dtype) + torch.matmul(Xtrain.transpose(-1, -2), Xtrain))
     beta_hat = matmul(XXinv, matmul(Xtrain.transpose(-1, -2), Ytrain))
 
     def regressor(X0):
@@ -297,10 +306,29 @@ def regress_linear(X, Y, train_pct=0.5):
     return Yhat, regressor
 
 
-def regress_krr(X, Y, train_pct=0.5, kernel_param=None):
+def regress_krr(X, Y, regress_param=None):
 
-    if kernel_param is None:
-        kernel_param = {'type': 'RBF', 'param': {'scale': torch.ones(1), 'lengthscale': torch.ones(1)}}
+    # Default params
+    if regress_param is None:
+        regress_param = {}
+
+    if 'train_pct' not in regress_param.keys():
+        train_pct = 0.8
+    else:
+        train_pct = regress_param['train_pct']
+
+    if 'alpha' not in regress_param.keys():
+        alpha = 1e-3
+    else:
+        alpha = regress_param['alpha']
+
+    if 'kernel_param' not in regress_param.keys():
+        o1 = torch.ones(1, device=X.device, dtype=X.dtype)
+        kernel_param = {'type': 'RBF', 'param': {'scale': o1, 'lengthscale': 2 * o1}}
+    else:
+        kernel_param = regress_param['kernel_param']
+
+    # Init kernel
     if kernel_param['type'] == 'RBF':
         kernel = kernels.RBFKernel(**kernel_param['param'])
     if kernel_param['type'] == 'RQ':
@@ -308,10 +336,10 @@ def regress_krr(X, Y, train_pct=0.5, kernel_param=None):
     if kernel_param['type'] == 'POLY':
         kernel = kernels.POLYKernel(**kernel_param['param'])
 
-    alpha = 1e-3
+
     Xtrain, Ytrain = sample_XYtrain(X, Y, train_pct)
     KXtrainXtrain = kernel.forward(Xtrain, Xtrain).squeeze(0)
-    INN = torch.eye(KXtrainXtrain.shape[0])
+    INN = torch.eye(KXtrainXtrain.shape[0],device=KXtrainXtrain.device, dtype=KXtrainXtrain.dtype)
     beta_hat = matmul(torch.linalg.inv(KXtrainXtrain + alpha * INN), Ytrain)
 
     def regressor(X0):
